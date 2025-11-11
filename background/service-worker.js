@@ -1,45 +1,59 @@
-// background/service-worker.js
+// background/service-worker.js (V3.3 - 最终修复版)
 
-// 监听来自 content_script (detector.js) 的消息
-chrome.runtime.onMessage.addListener(async (message) => {
-    if (message.action === "play_sound") {
-        console.log("Service Worker 收到 play_sound 请求");
-        await setupOffscreenDocument('offscreen/offscreen.html');
-    }
-});
+// ------------------------------------------
+// 1. 声音播放逻辑 (不变)
+// ------------------------------------------
 
-let creating; // 状态锁，防止重复创建
-
-/**
- * 创建或管理 Offscreen 文档
- * @param {string} path - offscreen.html 的路径
- */
+let creating; // 状态锁
 async function setupOffscreenDocument(path) {
-    // 检查是否已存在一个 offscreen document
     if (await chrome.offscreen.hasDocument()) {
-        // 如果已存在，先关闭它，再创建新的
-        // 这能确保声音总是从头开始播放（而不是多个声音重叠）
         await chrome.offscreen.closeDocument();
     }
-
-    // 防止在创建过程中重复调用
     if (creating) {
         await creating;
         return;
     }
-
-    // 创建 Offscreen 文档
     creating = chrome.offscreen.createDocument({
         url: path,
-        reasons: ['AUDIO_PLAYBACK'], // 必须声明原因
+        reasons: ['AUDIO_PLAYBACK'],
         justification: 'To play a notification sound when LLM responds.'
     });
-
     try {
         await creating;
     } catch (error) {
         console.error("创建 Offscreen document 失败:", error);
     } finally {
-        creating = null; // 释放锁
+        creating = null;
     }
 }
+
+// ------------------------------------------
+// 2. 新的网络请求侦测逻辑 (V3.3)
+// ------------------------------------------
+
+/**
+ * 我们要监听的 URL 模式。
+ */
+const GEMINI_URL_PATTERN = "*://gemini.google.com/*/StreamGenerate*";
+
+// 监听 "onCompleted" 事件
+chrome.webRequest.onCompleted.addListener(
+    (details) => {
+        // 确保请求是成功的
+        if (details.statusCode === 200) {
+            console.log("Gemini 响应完成 (V3.3)！正在播放声音...");
+            setupOffscreenDocument('offscreen/offscreen.html');
+        } else {
+            console.warn(`侦测到 StreamGenerate，但状态码为: ${details.statusCode}`);
+        }
+    },
+    {
+        // 过滤条件：只监听我们感兴趣的 URL
+        urls: [GEMINI_URL_PATTERN],
+        // 过滤条件：只监听 XHR
+        types: ["xmlhttprequest"] 
+    }
+);
+
+console.log("Service Worker (V3.3 - 最终修复版) 已加载。");
+console.log(`正在监听: ${GEMINI_URL_PATTERN}`);
