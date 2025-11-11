@@ -9,14 +9,16 @@
         "128": "assets/icons/icon-128.png"
     },
     "permissions": [
-        "offscreen",  
+        "offscreen",
         "webRequest"
     ],
     "host_permissions": [
-        "https://gemini.google.com/*"
+        "https://gemini.google.com/*",
+        "https://chatgpt.com/*"
     ],
     "background": {
-        "service_worker": "background/service-worker.js"
+        "service_worker": "background/service-worker.js",
+        "type": "module"
     },
     "web_accessible_resources": [
         {

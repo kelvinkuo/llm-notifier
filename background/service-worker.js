@@ -1,10 +1,8 @@
-// background/service-worker.js (V3.3 - 最终修复版)
+import providers from "./providers/index.js";
 
-// ------------------------------------------
-// 1. 声音播放逻辑 (不变)
-// ------------------------------------------
+const OFFSCREEN_DOC_PATH = "offscreen/offscreen.html";
 
-let creating; // 状态锁
+let creating;
 async function setupOffscreenDocument(path) {
     if (await chrome.offscreen.hasDocument()) {
         await chrome.offscreen.closeDocument();
@@ -15,8 +13,8 @@ async function setupOffscreenDocument(path) {
     }
     creating = chrome.offscreen.createDocument({
         url: path,
-        reasons: ['AUDIO_PLAYBACK'],
-        justification: 'To play a notification sound when LLM responds.'
+        reasons: ["AUDIO_PLAYBACK"],
+        justification: "To play a notification sound when LLM responds.",
     });
     try {
         await creating;
@@ -27,33 +25,48 @@ async function setupOffscreenDocument(path) {
     }
 }
 
-// ------------------------------------------
-// 2. 新的网络请求侦测逻辑 (V3.3)
-// ------------------------------------------
+async function playNotification(providerName) {
+    console.log(`${providerName} 响应完成，正在播放提示音…`);
+    await setupOffscreenDocument(OFFSCREEN_DOC_PATH);
+}
 
-/**
- * 我们要监听的 URL 模式。
- */
-const GEMINI_URL_PATTERN = "*://gemini.google.com/*/StreamGenerate*";
+function createLogger(providerName) {
+    return {
+        info: (...args) => console.log(`[${providerName}]`, ...args),
+        warn: (...args) => console.warn(`[${providerName}]`, ...args),
+        error: (...args) => console.error(`[${providerName}]`, ...args),
+    };
+}
 
-// 监听 "onCompleted" 事件
-chrome.webRequest.onCompleted.addListener(
-    (details) => {
-        // 确保请求是成功的
-        if (details.statusCode === 200) {
-            console.log("Gemini 响应完成 (V3.3)！正在播放声音...");
-            setupOffscreenDocument('offscreen/offscreen.html');
-        } else {
-            console.warn(`侦测到 StreamGenerate，但状态码为: ${details.statusCode}`);
-        }
-    },
-    {
-        // 过滤条件：只监听我们感兴趣的 URL
-        urls: [GEMINI_URL_PATTERN],
-        // 过滤条件：只监听 XHR
-        types: ["xmlhttprequest"] 
+function registerProvider(provider) {
+    const { name, requestFilter, handleCompleted, extraInfoSpec } = provider;
+
+    if (!requestFilter || !Array.isArray(requestFilter.urls) || requestFilter.urls.length === 0) {
+        console.error(`[${name ?? "未知提供者"}] 缺少有效的 requestFilter.urls，已跳过注册。`);
+        return;
     }
-);
+    if (typeof handleCompleted !== "function") {
+        console.error(`[${name ?? "未知提供者"}] 缺少 handleCompleted 实现，已跳过注册。`);
+        return;
+    }
 
-console.log("Service Worker (V3.3 - 最终修复版) 已加载。");
-console.log(`正在监听: ${GEMINI_URL_PATTERN}`);
+    const logger = createLogger(name ?? "未知提供者");
+
+    const listener = async (details) => {
+        try {
+            await handleCompleted(details, {
+                playNotification: () => playNotification(name ?? "未知提供者"),
+                logger,
+            });
+        } catch (error) {
+            logger.error("处理请求时出现异常:", error);
+        }
+    };
+
+    chrome.webRequest.onCompleted.addListener(listener, requestFilter, extraInfoSpec);
+    logger.info(`正在监听 URL: ${requestFilter.urls.join(", ")}`);
+}
+
+providers.forEach(registerProvider);
+
+console.log("Service Worker 已加载，已启用的模型：", providers.map((provider) => provider.name).join(", "));
