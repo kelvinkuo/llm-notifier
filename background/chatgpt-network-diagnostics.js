@@ -1,3 +1,6 @@
+// Diagnostics only. Logs ChatGPT XHR timing when DEBUG is enabled.
+// This module does not classify requests and does not decide completion.
+
 import { DEBUG, createLogger } from "../shared/logger.js";
 
 const logger = createLogger("ChatGPTNetwork");
@@ -15,6 +18,7 @@ function sanitizeUrl(url) {
         return url;
     }
 }
+
 
 function createRequestLog(details) {
     return {

@@ -55,36 +55,46 @@ function createProviderLogger(providerName) {
     return createModuleLogger(`${providerName}Provider`);
 }
 
-function registerProvider(provider) {
-    const { name, requestFilter, handleCompleted, extraInfoSpec } = provider;
+function providerName(provider) {
+    return provider.name ?? "未知提供者";
+}
 
-    if (!requestFilter || !Array.isArray(requestFilter.urls) || requestFilter.urls.length === 0) {
+function registerWebRequest(provider) {
+    const { requestFilter, handleCompleted, extraInfoSpec } = provider;
+    if (!requestFilter) {
+        return;
+    }
+
+    if (!Array.isArray(requestFilter.urls) || requestFilter.urls.length === 0) {
         logger.error("Provider 缺少有效的 requestFilter.urls，已跳过注册。", {
-            provider: name ?? "未知提供者",
+            provider: providerName(provider),
         });
         return;
     }
     if (typeof handleCompleted !== "function") {
         logger.error("Provider 缺少 handleCompleted 实现，已跳过注册。", {
-            provider: name ?? "未知提供者",
+            provider: providerName(provider),
         });
         return;
     }
 
-    const providerLogger = createProviderLogger(name ?? "未知提供者");
+    const providerLogger = createProviderLogger(providerName(provider));
+    const context = {
+        playNotification: () => playNotification(providerName(provider)),
+        logger: providerLogger,
+    };
 
     const listener = async (details) => {
         try {
-            await handleCompleted(details, {
-                playNotification: () => playNotification(name ?? "未知提供者"),
-                logger: providerLogger,
-            });
+            await handleCompleted(details, context);
         } catch (error) {
             providerLogger.error("处理请求时出现异常:", error);
         }
     };
 
     chrome.webRequest.onCompleted.addListener(listener, requestFilter, extraInfoSpec);
+    registerOptionalListener("onBeforeRequest", provider.handleBeforeRequest, requestFilter, providerLogger);
+    registerOptionalListener("onErrorOccurred", provider.handleError, requestFilter, providerLogger);
     providerLogger.info("Provider 已注册。", {
         requestFilter,
         extraInfoSpec: extraInfoSpec ?? [],
@@ -92,8 +102,59 @@ function registerProvider(provider) {
     });
 }
 
-providers.forEach(registerProvider);
+function registerOptionalListener(eventName, handler, requestFilter, providerLogger) {
+    if (typeof handler !== "function") {
+        return;
+    }
+
+    const listener = (details) => {
+        try {
+            handler(details, { logger: providerLogger });
+        } catch (error) {
+            providerLogger.error("处理请求时出现异常:", error);
+        }
+    };
+
+    chrome.webRequest[eventName].addListener(listener, requestFilter);
+}
+
+function registerRuntimeMessages() {
+    const handlers = providers.filter((provider) => typeof provider.handleRuntimeMessage === "function");
+    if (handlers.length === 0) {
+        return;
+    }
+
+    chrome.runtime.onMessage.addListener((message, sender) => {
+        for (const provider of handlers) {
+            provider.handleRuntimeMessage(message, sender, {
+                playNotification: () => playNotification(providerName(provider)),
+                logger,
+                offscreenPath: OFFSCREEN_DOC_PATH,
+            });
+        }
+    });
+}
+
+function registerNavigation(provider) {
+    const navigation = provider.navigation;
+    if (!navigation || typeof navigation.onHistoryStateUpdated !== "function") {
+        return;
+    }
+
+    try {
+        chrome.webNavigation.onHistoryStateUpdated.addListener(
+            (details) => navigation.onHistoryStateUpdated(details),
+            { url: navigation.url },
+        );
+    } catch (error) {
+        logger.error(`${providerName(provider)} 路由监听注册失败。`, error);
+    }
+}
+
+registerRuntimeMessages();
+providers.forEach(registerWebRequest);
 registerChatGPTNetworkDiagnostics();
+providers.forEach(registerNavigation);
 
 logger.info("Service worker 已加载。", {
     version: chrome.runtime.getManifest().version,

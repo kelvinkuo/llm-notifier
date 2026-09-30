@@ -1,104 +1,188 @@
-const CHATGPT_URL_PATTERNS = [
-    "*://chat.openai.com/*conversation",
-    "*://chatgpt.com/*conversation",
-    "*://chatgpt.com/*conversation/prepare"
+import {
+    classifyChatGPTRequest,
+    hintForChatGPTRequest,
+    isChatGPTPageUrl,
+    sanitizePageUrl,
+} from "./chatgpt-url.js";
+
+const CHATGPT_NAVIGATION_URLS = [
+    { hostEquals: "chatgpt.com" },
+    { hostEquals: "www.chatgpt.com" },
+    { hostEquals: "chat.openai.com" },
 ];
 
-const PHASE_WAITING_FOR_POST_PREPARE = "waiting-for-post-prepare";
-const completionStateByTab = new Map();
+function chatGPTTrace(enabled, event, meta) {
+    if (!enabled) return;
+    console.log("[AI Completion][ChatGPT]", event, meta);
+}
 
-function getRequestKind(url) {
-    try {
-        const { pathname } = new URL(url);
-        if (pathname === "/backend-api/f/conversation") {
-            return "main-conversation";
+function sendTabMessage(tabId, payload) {
+    return globalThis.chrome.tabs.sendMessage(tabId, payload);
+}
+
+export function handleChatGPTRuntimeMessage(message, sender, context) {
+    const { playNotification, logger, offscreenPath } = context;
+
+    if (message?.type === "chatgpt_detector_ready") {
+        let page = "";
+        try {
+            page = sanitizePageUrl(sender.url || sender.tab?.url || "");
+        } catch {
+            page = "";
         }
-        if (pathname === "/backend-api/f/conversation/prepare") {
-            return "conversation-prepare";
-        }
-    } catch {
-        return "unknown";
+        chatGPTTrace(Boolean(message.debug), "CHATGPT_DETECTOR_READY", {
+            tabId: sender.tab?.id ?? null,
+            page,
+            version: message.version ?? null,
+        });
+        return;
     }
-    return "other";
+
+    if (message?.action !== "play_sound" || message.provider !== "ChatGPT") {
+        return;
+    }
+    if (typeof sender.frameId === "number" && sender.frameId !== 0) {
+        return;
+    }
+    const pageUrl = sender.url || sender.tab?.url || "";
+    if (!isChatGPTPageUrl(pageUrl)) {
+        logger.warn("忽略非 ChatGPT 页面的播放请求。");
+        return;
+    }
+
+    let page = pageUrl;
+    try {
+        page = sanitizePageUrl(pageUrl);
+    } catch {
+        page = "";
+    }
+    const trace = {
+        tabId: sender.tab?.id ?? null,
+        page,
+        reason: message.reason,
+        sequence: message.sequence,
+        messageId: message.messageId ?? null,
+    };
+    chatGPTTrace(Boolean(message.debug), "PLAY_SOUND_RECEIVED", trace);
+    chatGPTTrace(Boolean(message.debug), "PLAY_NOTIFICATION_CALL", { provider: "ChatGPT" });
+    chatGPTTrace(Boolean(message.debug), "OFFSCREEN_DISPATCH", { path: offscreenPath });
+    logger.info("收到 ChatGPT 完成事件，准备播放提示音。", trace);
+    playNotification().catch((error) => {
+        logger.error("播放 ChatGPT 通知失败。", error);
+    });
+}
+
+export function forwardChatGPTRouteChange(details, sendMessage = sendTabMessage) {
+    if (details.frameId !== 0) {
+        return;
+    }
+
+    let url;
+    try {
+        url = sanitizePageUrl(details.url);
+    } catch {
+        return;
+    }
+
+    const delivery = sendMessage(details.tabId, {
+        type: "CHATGPT_ROUTE_CHANGED",
+        url,
+    });
+    if (delivery && typeof delivery.catch === "function") {
+        delivery.catch(() => {});
+    }
+}
+
+const CHATGPT_URL_PATTERNS = [
+    "*://chat.openai.com/*conversation*",
+    "*://chatgpt.com/*conversation*",
+    "*://chat.openai.com/*finalize*",
+    "*://chatgpt.com/*finalize*",
+];
+
+function pathnameOf(url) {
+    try {
+        return new URL(url).pathname;
+    } catch {
+        return null;
+    }
+}
+
+function sendHint(tabId, hint, details, logger) {
+    if (typeof tabId !== "number" || tabId < 0) {
+        return;
+    }
+
+    const payload = {
+        type: "CHATGPT_NETWORK_HINT",
+        hint,
+        requestId: details.requestId,
+        statusCode: typeof details.statusCode === "number" ? details.statusCode : null,
+    };
+
+    try {
+        const delivery = globalThis.chrome.tabs.sendMessage(tabId, payload);
+        if (delivery && typeof delivery.catch === "function") {
+            delivery.catch((error) => {
+                logger.debug("网络 hint 未送达页面。", {
+                    hint,
+                    tabId,
+                    pathname: pathnameOf(details.url),
+                    message: error?.message || String(error),
+                });
+            });
+        }
+    } catch (error) {
+        logger.debug("网络 hint 发送失败。", {
+            hint,
+            tabId,
+            message: error?.message || String(error),
+        });
+    }
+}
+
+function forward(details, phase, logger) {
+    const kind = classifyChatGPTRequest(details.url, details.method);
+    if (!kind) {
+        return;
+    }
+
+    const hint = hintForChatGPTRequest(kind, phase, details.statusCode);
+    if (!hint) {
+        return;
+    }
+
+    logger.debug("转发 ChatGPT 网络 hint。", {
+        hint,
+        kind,
+        pathname: pathnameOf(details.url),
+        method: details.method,
+        statusCode: details.statusCode,
+        tabId: details.tabId,
+        requestId: details.requestId,
+    });
+    sendHint(details.tabId, hint, details, logger);
 }
 
 const chatgptProvider = {
     name: "ChatGPT",
     requestFilter: {
         urls: CHATGPT_URL_PATTERNS,
-        types: ["xmlhttprequest"],
     },
-    async handleCompleted(details, { playNotification, logger }) {
-        logger.debug("收到 onCompleted 事件。", {
-            url: details.url,
-            method: details.method,
-            statusCode: details.statusCode,
-            type: details.type,
-            tabId: details.tabId,
-            requestId: details.requestId,
-            timeStamp: details.timeStamp,
-            ...(details.initiator ? { initiator: details.initiator } : {}),
-        });
-
-        const requestKind = getRequestKind(details.url);
-        const currentState = completionStateByTab.get(details.tabId);
-
-        if (
-            requestKind === "main-conversation" &&
-            details.statusCode === 200 &&
-            details.method === "POST"
-        ) {
-            completionStateByTab.set(details.tabId, {
-                phase: PHASE_WAITING_FOR_POST_PREPARE,
-                mainRequestId: details.requestId,
-            });
-            logger.info("主 conversation 请求完成，等待后置 prepare。", {
-                requestId: details.requestId,
-                tabId: details.tabId,
-            });
-            return;
-        }
-
-        if (
-            requestKind === "conversation-prepare" &&
-            details.statusCode === 200 &&
-            details.method === "POST"
-        ) {
-            if (currentState?.phase === PHASE_WAITING_FOR_POST_PREPARE) {
-                completionStateByTab.delete(details.tabId);
-                logger.info("检测到主请求后的 prepare，完成证据链成立，决定触发通知。", {
-                    requestId: details.requestId,
-                    tabId: details.tabId,
-                    mainRequestId: currentState.mainRequestId,
-                });
-                await playNotification();
-            } else {
-                logger.debug("忽略非后置 prepare。", {
-                    requestId: details.requestId,
-                    tabId: details.tabId,
-                    currentPhase: currentState?.phase ?? "idle",
-                });
-            }
-            return;
-        }
-
-        const rejectionReasons = [];
-        if (requestKind === "unknown" || requestKind === "other") {
-            rejectionReasons.push(`不是完成证据链请求（类型为 ${requestKind}）`);
-        }
-        if (details.statusCode !== 200) {
-            rejectionReasons.push(`statusCode 不是 200（实际为 ${details.statusCode}）`);
-        }
-        if (details.method !== "POST") {
-            rejectionReasons.push(`method 不是 POST（实际为 ${details.method}）`);
-        }
-        logger.warn("请求不满足当前完成证据链条件，已忽略。", {
-            requestId: details.requestId,
-            tabId: details.tabId,
-            requestKind,
-            currentPhase: currentState?.phase ?? "idle",
-            reasons: rejectionReasons,
-        });
+    handleBeforeRequest(details, { logger }) {
+        forward(details, "start", logger);
+    },
+    // Network completion is a hint for the content script. It does not play sound.
+    handleCompleted(details, { logger }) {
+        forward(details, "end", logger);
+    },
+    handleError(details, { logger }) {
+        forward(details, "error", logger);
+    },
+    handleRuntimeMessage: handleChatGPTRuntimeMessage,
+    navigation: {
+        url: CHATGPT_NAVIGATION_URLS,
+        onHistoryStateUpdated: forwardChatGPTRouteChange,
     },
 };
 

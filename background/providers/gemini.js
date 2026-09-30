@@ -1,5 +1,9 @@
 const GEMINI_URL_PATTERN = "*://gemini.google.com/*/StreamGenerate*";
 
+export function isGeminiStreamComplete(details) {
+    return details.statusCode === 200 && details.method === "POST";
+}
+
 const geminiProvider = {
     name: "Gemini",
     requestFilter: {
@@ -7,7 +11,7 @@ const geminiProvider = {
         types: ["xmlhttprequest"],
     },
     handleCompleted(details, { playNotification, logger }) {
-        if (details.statusCode === 200 && details.method === "POST") {
+        if (isGeminiStreamComplete(details)) {
             logger.info("响应完成。");
             playNotification();
         } else {
