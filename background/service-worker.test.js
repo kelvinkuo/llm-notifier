@@ -10,7 +10,7 @@ test('diagnostic handshake returns tabId and offscreen milestones reach the work
         runtime: {
             onMessage: { addListener(fn) { runtimeListeners.push(fn); } },
             getURL: path => `chrome-extension://fixture/${path}`,
-            getManifest: () => ({ version: '1.5.1' }),
+            getManifest: () => ({ version: '1.5.2' }),
             sendMessage: async () => ({ ok: true }),
         },
         webRequest: { onBeforeRequest: event(), onCompleted: event(), onErrorOccurred: event() },

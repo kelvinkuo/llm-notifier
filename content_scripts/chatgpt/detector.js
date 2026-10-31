@@ -458,7 +458,7 @@
     }
 
     const CHATGPT_DEBUG = true;
-    const CHATGPT_DETECTOR_VERSION = "1.5.1";
+    const CHATGPT_DETECTOR_VERSION = "1.5.2";
     const PREFIX = "[LLM Notifier][ChatGPT]";
     const diagnosticId = "doc-" + Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 8);
     let diagnosticTabId = null;
