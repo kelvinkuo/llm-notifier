@@ -2,7 +2,7 @@
     "manifest_version": 3,
     "name": "LLM 响应通知器",
     "description": "当ChatGPT或Gemini响应完成时播放提示音。",
-    "version": "1.5.1", 
+    "version": "1.5.1",
     "icons": {
         "16": "assets/icons/icon-16.png",
         "48": "assets/icons/icon-48.png",
@@ -31,6 +31,16 @@
                 "content_scripts/chatgpt/detector.js"
             ],
             "run_at": "document_idle"
+        },
+        {
+            "matches": [
+                "https://gemini.google.com/*"
+            ],
+            "js": [
+                "content_scripts/gemini/completion-machine.js",
+                "content_scripts/gemini/detector.js"
+            ],
+            "run_at": "document_idle"
         }
     ],
     "background": {
@@ -40,11 +50,13 @@
     "web_accessible_resources": [
         {
             "resources": [
-                "assets/sounds/notification.mp3",
+                "assets/sounds/notify.mp3",
                 "offscreen/offscreen.html",
                 "offscreen/offscreen.js"
             ],
-            "matches": [ "<all_urls>" ]
+            "matches": [
+                "<all_urls>"
+            ]
         }
     ]
 }

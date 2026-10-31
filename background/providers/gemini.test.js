@@ -1,47 +1,39 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import geminiProvider, { isGeminiStreamComplete } from "./gemini.js";
+import { createGeminiProvider } from "./gemini.js";
 
-test("gemini stream completion is a successful POST only", function () {
-    assert.equal(isGeminiStreamComplete({ statusCode: 200, method: "POST" }), true);
-    assert.equal(isGeminiStreamComplete({ statusCode: 200, method: "GET" }), false);
-    assert.equal(isGeminiStreamComplete({ statusCode: 500, method: "POST" }), false);
-});
-
-test("gemini provider plays through the shared notification callback", function () {
-    const logger = {
-        info: [],
-        warn: [],
-    };
+const message = { action: "play_sound", provider: "Gemini", session: "test-session", sequence: 1 };
+function sender(id = 1, documentId = 'doc') {
+    return { tab: { id }, documentId, frameId: 0, url: "https://gemini.google.com/app/test" };
+}
+function harness() {
+    const provider = createGeminiProvider();
     let played = 0;
-    geminiProvider.handleCompleted(
-        { statusCode: 200, method: "POST" },
-        {
-            playNotification: function () { played += 1; },
-            logger: {
-                info: function (message) { logger.info.push(message); },
-                warn: function (message) { logger.warn.push(message); },
-            },
-        },
-    );
-    assert.equal(played, 1);
-    assert.deepEqual(logger.info, ["响应完成。"]);
-    assert.deepEqual(logger.warn, []);
+    const context = { playNotification: async () => { played++; }, logger: { error() {} } };
+    return { provider, context, played: () => played };
+}
+test("Gemini deduplicates per document and sequence, not across tabs", async () => {
+    const h = harness();
+    await Promise.all([1, 2].map(id => h.provider.handleRuntimeMessage(message, sender(id), h.context)));
+    await h.provider.handleRuntimeMessage(message, sender(), h.context);
+    await h.provider.handleRuntimeMessage({ ...message, sequence: 2 }, sender(), h.context);
+    await h.provider.handleRuntimeMessage(message, sender(1, 'reloaded'), h.context);
+    assert.equal(h.played(), 4);
+    assert.equal(h.provider.requestFilter, undefined);
 });
-
-test("gemini provider does not play for a non-success stream", function () {
-    const warnings = [];
-    let played = 0;
-    geminiProvider.handleCompleted(
-        { statusCode: 500, method: "POST" },
-        {
-            playNotification: function () { played += 1; },
-            logger: {
-                info: function () {},
-                warn: function (message) { warnings.push(message); },
-            },
-        },
-    );
-    assert.equal(played, 0);
-    assert.deepEqual(warnings, ["侦测到请求但状态码为 500"]);
+test("Gemini rejects untrusted senders and malformed events", () => {
+    const h = harness();
+    for (const source of [{ ...sender(), frameId: 1 }, { ...sender(), url: 'https://evil.test/' }, { frameId: 0 }]) {
+        h.provider.handleRuntimeMessage(message, source, h.context);
+    }
+    for (const patch of [{ provider: 'ChatGPT' }, { sequence: 0 }, { sequence: NaN }, { session: '' }]) {
+        h.provider.handleRuntimeMessage({ ...message, ...patch }, sender(), h.context);
+    }
+    assert.equal(h.played(), 0);
+});
+test("sequence resets after reload even without Chrome documentId", async () => {
+    const h = harness();
+    await h.provider.handleRuntimeMessage(message, sender(1, undefined), h.context);
+    await h.provider.handleRuntimeMessage({ ...message, session: 'new' }, { ...sender(), documentId: undefined }, h.context);
+    assert.equal(h.played(), 2);
 });

@@ -1284,3 +1284,18 @@ test("active to unknown waits for ready empty before notifying", function () {
     assert.ok(harness.trace.some(function (entry) { return entry.event === "PRIMARY_COMPLETION_PATH"; }));
     assert.equal(harness.trace.some(function (entry) { return entry.event === "FALLBACK_COMPLETION_PATH"; }), false);
 });
+
+test("anonymous /uc route promotion keeps the first response and history switches cancel it", function () {
+    const h = createHarness();
+    assert.equal(sandbox.ChatGPTCompletion.conversationKeyFromUrl('https://chatgpt.com/uc/anonymous-id'), 'c:anonymous-id');
+    h.controller.noteRouteChange('https://chatgpt.com/');
+    h.controller.noteBaseline({ userMessageIds: [], assistantMessageIds: [] });
+    h.controller.noteDom({ userMessageIds: ['u1'], assistantMessageIds: ['a1'], composerState: 'ACTIVE' });
+    h.controller.noteRouteChange('https://chatgpt.com/uc/anonymous-id');
+    h.controller.noteDom({ userMessageIds: ['u1'], assistantMessageIds: ['a1'], composerState: 'READY_EMPTY' });
+    h.advance(800); assert.equal(h.notifications.length, 1);
+    h.controller.noteDom({ userMessageIds: ['u1', 'u2'], assistantMessageIds: ['a1', 'a2'], composerState: 'ACTIVE' });
+    h.controller.noteRouteChange('https://chatgpt.com/uc/another-id');
+    h.controller.noteDom({ userMessageIds: ['historic-u'], assistantMessageIds: ['historic-a'], composerState: 'READY_EMPTY' });
+    h.advance(5000); assert.equal(h.notifications.length, 1);
+});

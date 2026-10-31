@@ -1,3 +1,5 @@
+import { DEBUG } from "../../shared/logger.js";
+
 import {
     classifyChatGPTRequest,
     hintForChatGPTRequest,
@@ -13,7 +15,7 @@ const CHATGPT_NAVIGATION_URLS = [
 
 function chatGPTTrace(enabled, event, meta) {
     if (!enabled) return;
-    console.log("[AI Completion][ChatGPT]", event, meta);
+    console.log("[LLM Notifier][ChatGPT]", event, JSON.stringify({ time: new Date().toISOString(), ...meta }));
 }
 
 function sendTabMessage(tabId, payload) {
@@ -30,10 +32,11 @@ export function handleChatGPTRuntimeMessage(message, sender, context) {
         } catch {
             page = "";
         }
-        chatGPTTrace(Boolean(message.debug), "CHATGPT_DETECTOR_READY", {
+        chatGPTTrace(DEBUG || Boolean(message.debug), "CHATGPT_DETECTOR_READY", {
             tabId: sender.tab?.id ?? null,
             page,
             version: message.version ?? null,
+            diagnosticId: message.diagnosticId ?? null,
         });
         return;
     }
@@ -42,10 +45,12 @@ export function handleChatGPTRuntimeMessage(message, sender, context) {
         return;
     }
     if (typeof sender.frameId === "number" && sender.frameId !== 0) {
+        chatGPTTrace(DEBUG, "PLAY_SOUND_REJECTED", { reason: "non-top-frame", tabId: sender.tab?.id ?? null });
         return;
     }
     const pageUrl = sender.url || sender.tab?.url || "";
     if (!isChatGPTPageUrl(pageUrl)) {
+        chatGPTTrace(DEBUG, "PLAY_SOUND_REJECTED", { reason: "unexpected-host", tabId: sender.tab?.id ?? null });
         logger.warn("忽略非 ChatGPT 页面的播放请求。");
         return;
     }
@@ -62,12 +67,13 @@ export function handleChatGPTRuntimeMessage(message, sender, context) {
         reason: message.reason,
         sequence: message.sequence,
         messageId: message.messageId ?? null,
+        diagnosticId: message.diagnosticId ?? null,
     };
-    chatGPTTrace(Boolean(message.debug), "PLAY_SOUND_RECEIVED", trace);
-    chatGPTTrace(Boolean(message.debug), "PLAY_NOTIFICATION_CALL", { provider: "ChatGPT" });
-    chatGPTTrace(Boolean(message.debug), "OFFSCREEN_DISPATCH", { path: offscreenPath });
+    chatGPTTrace(DEBUG || Boolean(message.debug), "PLAY_SOUND_RECEIVED", trace);
+    chatGPTTrace(DEBUG || Boolean(message.debug), "PLAY_NOTIFICATION_CALL", { provider: "ChatGPT" });
+    chatGPTTrace(DEBUG || Boolean(message.debug), "OFFSCREEN_DISPATCH", { path: offscreenPath });
     logger.info("收到 ChatGPT 完成事件，准备播放提示音。", trace);
-    playNotification().catch((error) => {
+    playNotification(trace).catch((error) => {
         logger.error("播放 ChatGPT 通知失败。", error);
     });
 }

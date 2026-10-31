@@ -18,7 +18,7 @@
         try {
             const parsed = new URL(url);
             const parts = parsed.pathname.split("/").filter(Boolean);
-            const index = parts.indexOf("c");
+            const index = parts.findIndex(function (part) { return part === "c" || part === "uc"; });
             if (index >= 0 && parts[index + 1]) {
                 return `c:${parts[index + 1]}`;
             }

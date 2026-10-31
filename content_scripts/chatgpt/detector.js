@@ -3,12 +3,14 @@
 
     // data-message-author-role is a legacy fallback selector, not a required match.
     const USER_SELECTORS = [
+        "[data-message-role='user']",
         "[data-content-search-unit-key$=':user']",
         "[data-chatgpt-search-unit-key$=':user']",
-        "[data-user-message-bubble='true']",
+        "[data-user-message-bubble]",
         "[data-message-author-role='user']",
     ];
     const ASSISTANT_SELECTORS = [
+        "[data-message-role='assistant']",
         "[data-content-search-unit-key$=':assistant']",
         "[data-chatgpt-search-unit-key$=':assistant']",
         "[data-markdown-text-style='assistant-message']",
@@ -114,6 +116,10 @@
 
     function messageIdentity(element) {
         if (!element) return null;
+        // Current transcript turns use a stable DOM id on the role-bearing element.
+        if (element.getAttribute("data-message-role") && element.getAttribute("id")) {
+            return element.getAttribute("id");
+        }
         const selectionId = readAttr(element, "data-chatgpt-selection-message-id");
         if (selectionId) return selectionId;
         const searchIds = readAttr(element, "data-chatgpt-search-message-ids");
@@ -173,9 +179,7 @@
 
     function findComposer(doc, root) {
         const scope = doc || null;
-        const prompt = scope && scope.getElementById ? scope.getElementById("prompt-textarea") : null;
-        if (prompt) return prompt.closest("form") || prompt;
-        const editable = scope && scope.querySelector ? scope.querySelector("[contenteditable='true']") : null;
+        const editable = findEditable(scope);
         if (editable) return editable.closest("form") || editable;
         if (root && root.querySelector) {
             const form = root.querySelector("form");
@@ -281,7 +285,7 @@
     function findEditable(scope) {
         if (!scope) return null;
         if (scope.getElementById) {
-            const prompt = scope.getElementById("prompt-textarea");
+            const prompt = scope.getElementById("prompt-textarea") || scope.getElementById("mobile-composer-prompt");
             if (prompt) return prompt;
         }
         if (scope.querySelector) return scope.querySelector("[contenteditable='true']");
@@ -342,9 +346,13 @@
         let active = null;
         let draft = null;
         let empty = null;
+        const editable = findEditable(doc);
         for (let i = 0; i < controls.length; i += 1) {
             const control = controls[i];
-            const state = classifyControl(control);
+            if (control.closest && control.closest("[hidden], [aria-hidden='true']")) continue;
+            let state = classifyControl(control);
+            if (state === COMPOSER_STATE.READY_DRAFT && editable && editable.tagName === "TEXTAREA"
+                && !String(editable.value || "").trim()) state = COMPOSER_STATE.READY_EMPTY;
             const described = {
                 state: state,
                 primaryLabel: controlLabel(control) || null,
@@ -408,6 +416,11 @@
         return false;
     }
 
+    function isAssistantPending(turn) {
+        return Boolean(turn && turn.getAttribute("data-message-role") === "assistant"
+            && turn.getAttribute("data-message-complete") === null);
+    }
+
     globalThis.ChatGPTMessageAdapter = {
         findUserMessages: findUserMessages,
         findAssistantMessages: findAssistantMessages,
@@ -421,6 +434,7 @@
         findComposer: findComposer,
         mutationTouchesElement: mutationTouchesElement,
         mutationAddsMessage: mutationAddsMessage,
+        isAssistantPending: isAssistantPending,
     };
 
     const composerApi = {
@@ -443,28 +457,33 @@
         return;
     }
 
-    const CHATGPT_DEBUG = false;
+    const CHATGPT_DEBUG = true;
     const CHATGPT_DETECTOR_VERSION = "1.5.1";
-    const PREFIX = "[AI Completion][ChatGPT]";
+    const PREFIX = "[LLM Notifier][ChatGPT]";
+    const diagnosticId = "doc-" + Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 8);
+    let diagnosticTabId = null;
+    function diagnostic(event, meta) {
+        if (!CHATGPT_DEBUG) return;
+        const write = event.includes("FAILED") ? console.error : console.log;
+        write(PREFIX, event, JSON.stringify({
+            time: new Date().toISOString(), diagnosticId, tabId: diagnosticTabId, ...meta,
+        }));
+    }
+    function errorDetail(error) {
+        return String(error?.message || error).replace(/https?:\/\/[^\s]+/g, "[url]");
+    }
     const SNAPSHOT_MS = 50;
     const messages = globalThis.ChatGPTMessageAdapter;
 
     function fail(error) {
-        const detail = error && error.stack ? error.stack : String(error);
-        console.error(PREFIX, "INIT_FAILED", detail);
+        diagnostic("INIT_FAILED", { error: errorDetail(error) });
     }
 
-    try {
-        if (CHATGPT_DEBUG) {
-            console.log(PREFIX, "BOOT", {
-                version: CHATGPT_DETECTOR_VERSION,
-                href: location.href,
-                readyState: document.readyState,
-            });
-        }
-    } catch (error) {
-        fail(error);
-    }
+    diagnostic("CONTENT_SCRIPT_LOADED", {
+        version: CHATGPT_DETECTOR_VERSION, readyState: document.readyState,
+        host: location.hostname, route: location.pathname.startsWith("/uc/") ? "anonymous-conversation"
+            : location.pathname.includes("/c/") ? "conversation" : "other",
+    });
 
     try {
         if (!globalThis.ChatGPTCompletion) {
@@ -493,15 +512,55 @@
             conversationKeyFromUrl,
         } = globalThis.ChatGPTCompletion;
 
-        function debug(event, meta) {
-            if (!CHATGPT_DEBUG) return;
-            if (meta === undefined) console.log(PREFIX, event);
-            else console.log(PREFIX, event, meta);
+        // Session-local aliases expose route ordering without logging conversation URLs/ids.
+        const diagnosticRoutes = new Map();
+        let routeDiagnosticSource = "initialization";
+        function routeAlias(key) {
+            if (!diagnosticRoutes.has(key)) diagnosticRoutes.set(key, "route-" + (diagnosticRoutes.size + 1));
+            return diagnosticRoutes.get(key);
+        }
+        function noteRoute(url, source) {
+            const key = conversationKeyFromUrl(url);
+            const liveKey = conversationKeyFromUrl(location.href);
+            const previousSource = routeDiagnosticSource;
+            routeDiagnosticSource = source;
+            debug("ROUTE_OBSERVED", {
+                source, reportedRoute: routeAlias(key), liveRoute: routeAlias(liveKey),
+                matchesLive: key === liveKey, ...controller.getState(),
+            });
+            try { controller.noteRouteChange(url); }
+            finally { routeDiagnosticSource = previousSource; }
+        }
+
+        function debug(event, meta = {}) {
+            // Existing controller emits assistant mutation signals on each streamed chunk.
+            if (event === "assistant mutation" || (event === "GENERATION_SIGNAL" && meta.signal === "assistant_mutation")) return;
+            const names = {
+                COMPOSER_TRANSITION: "COMPOSER_STATE_CHANGED", USER_TURN_DETECTED: "USER_TURN_STARTED",
+                GENERATION_ACTIVE_ENTER: "GENERATION_STARTED", GENERATION_IDLE_ENTER: "GENERATION_ENDED",
+                COMPLETED: "COMPLETION_CONFIRMED", PLAY_SOUND_SEND: "PLAY_SOUND_SENT",
+            };
+            const safe = { ...meta };
+            if (event === "route changed") {
+                safe.source = routeDiagnosticSource;
+                safe.fromRoute = routeAlias(meta.from);
+                safe.toRoute = routeAlias(meta.to);
+                const liveKey = conversationKeyFromUrl(location.href);
+                safe.liveRoute = routeAlias(liveKey);
+                safe.matchesLive = meta.to === liveKey;
+            }
+            for (const key of ["conversationKey", "from", "to"]) {
+                if (typeof safe[key] === "string" && /^(c:|path:)/.test(safe[key])) {
+                    safe[key] = safe[key].startsWith("c:") ? "conversation" : "draft-or-other";
+                }
+            }
+            diagnostic(names[event] || event, safe);
         }
 
         let boundRoot = null;
         let boundRootSelector = null;
         let previousSignature = null;
+        let previousDiagnosticState = null;
         let snapshotTimer = null;
         let conversationObserver = null;
         let composerObserver = null;
@@ -510,19 +569,33 @@
         let baselineAssistantIds = new Set();
         let trackedAssistantId = null;
         let trackedAssistantElement = null;
+        let awaitingFirstSubmission = true;
+        let hydrationSignature = null;
+
+        function noteUserTurnStarted(meta) {
+            // Startup history can hydrate long after document_idle. Capture it before
+            // the submit handler runs, rather than treating its arrival as a new turn.
+            if (awaitingFirstSubmission && boundRoot) controller.noteBaseline(readModel(boundRoot));
+            awaitingFirstSubmission = false;
+            controller.noteUserTurnStarted(meta);
+        }
 
         function postToWorker(payload, failureEvent) {
             try {
-                const delivery = chrome.runtime.sendMessage(payload);
-                if (delivery && typeof delivery.catch === "function") {
-                    delivery.catch(function (error) {
-                        const detail = error && error.message ? error.message : error;
-                        console.error(PREFIX, failureEvent, detail);
+                const delivery = chrome.runtime.sendMessage({ ...payload, diagnosticId });
+                if (delivery && typeof delivery.then === "function") {
+                    delivery.then(function (result) {
+                        if (payload.type === "chatgpt_detector_ready") {
+                            diagnosticTabId = result?.tabId ?? null;
+                            debug("DETECTOR_READY", { acknowledged: result?.ok === true });
+                        }
+                    }).catch(function (error) {
+                        debug(failureEvent, { error: errorDetail(error), sequence: payload.sequence });
                         if (failureEvent === "READY_FAILED") fail(error);
                     });
                 }
             } catch (error) {
-                console.error(PREFIX, failureEvent, error && error.stack ? error.stack : error);
+                debug(failureEvent, { error: errorDetail(error), sequence: payload.sequence });
                 if (failureEvent === "READY_FAILED") fail(error);
             }
         }
@@ -623,6 +696,7 @@
 
         function isTurnBusy(turn) {
             if (!turn) return false;
+            if (messages.isAssistantPending(turn)) return true;
             if (turn.getAttribute("aria-busy") === "true") return true;
             return Boolean(turn.querySelector("[aria-busy='true']"));
         }
@@ -684,7 +758,7 @@
                 if (location.pathname !== lastPathname) {
                     lastPathname = location.pathname;
                     previousSignature = null;
-                    controller.noteRouteChange(location.href);
+                    noteRoute(location.href, "pathname-snapshot");
                     if (controller.getState().phase === "IDLE") {
                         const baseline = readModel(boundRoot);
                         rememberSignature(baseline);
@@ -698,6 +772,29 @@
                     || model.assistantRebound
                 ));
                 rememberSignature(model);
+                const diagnosticState = {
+                    composerState: model.composerState, composerFound: model.composerFound,
+                    userCount: model.userMessageIds.length, assistantCount: model.assistantMessageIds.length,
+                    stopControl: model.stopControl, activityBlocked: model.activityBlocked,
+                    continueOffered: model.continueOffered,
+                };
+                const diagnosticSignature = JSON.stringify(diagnosticState);
+                if (diagnosticSignature !== previousDiagnosticState) {
+                    previousDiagnosticState = diagnosticSignature;
+                    debug("DETECTOR_STATE", { ...diagnosticState, ...controller.getState() });
+                }
+                if (awaitingFirstSubmission) {
+                    const signature = JSON.stringify([model.userMessageIds, model.assistantMessageIds]);
+                    if (signature !== hydrationSignature) {
+                        hydrationSignature = signature;
+                        controller.noteBaseline(model);
+                        debug("HISTORY_BASELINE_UPDATED", {
+                            userCount: model.userMessageIds.length, assistantCount: model.assistantMessageIds.length,
+                        });
+                    }
+                    return;
+                }
+                routeDiagnosticSource = "dom-snapshot";
                 controller.noteDom({
                     userMessageIds: model.userMessageIds,
                     assistantMessageIds: model.assistantMessageIds,
@@ -710,6 +807,7 @@
                     activityBlocked: model.activityBlocked,
                     conversationKey: model.conversationKey,
                 });
+                routeDiagnosticSource = "idle";
             } catch (error) {
                 fail(error);
             }
@@ -746,7 +844,7 @@
                     relevant = true;
                 } else if (mutation.type === "attributes") {
                     const name = mutation.attributeName || "";
-                    if (name === "aria-busy" || name === "data-testid" || name === "aria-label" || name === "disabled") {
+                    if (name === "aria-busy" || name === "data-testid" || name === "aria-label" || name === "disabled" || name === "data-message-complete") {
                         relevant = true;
                     }
                 }
@@ -766,6 +864,8 @@
                 childList: true,
                 subtree: true,
                 characterData: true,
+                attributes: true,
+                attributeFilter: ["aria-busy", "data-message-complete"],
             });
             syncComposerObserver();
             scheduleSnapshot();
@@ -793,7 +893,7 @@
                 childList: true,
                 subtree: true,
                 attributes: true,
-                attributeFilter: ["aria-label", "data-testid", "aria-busy", "disabled", "type"],
+                attributeFilter: ["aria-label", "data-testid", "aria-busy", "aria-hidden", "hidden", "disabled", "type"],
             });
         }
 
@@ -872,35 +972,47 @@
         }, true);
         document.addEventListener("click", function (event) {
             const control = controlFromEvent(event);
+            const clicked = event.target?.closest?.("button, [role='button']");
+            if (clicked) debug("USER_INPUT_OBSERVED", {
+                source: "click", controlInScope: Boolean(control),
+                sendRecognized: Boolean(control && isSendControl(control)),
+                stopRecognized: Boolean(control && isStopControl(control)),
+                composerFound: Boolean(findComposer(boundRoot)),
+            });
             if (!control) return;
             if (isStopControl(control)) {
                 controller.noteUserStopped();
                 return;
             }
             if (isRegenerateControl(control)) {
-                controller.noteUserTurnStarted({ source: "regenerate" });
+                noteUserTurnStarted({ source: "regenerate" });
                 return;
             }
-            if (isSendControl(control)) controller.noteUserTurnStarted({ source: "send" });
+            if (isSendControl(control)) noteUserTurnStarted({ source: "send" });
         }, true);
         document.addEventListener("keydown", function (event) {
             if (event.key !== "Enter" || event.shiftKey || event.isComposing) return;
             const target = event.target;
             if (!(target instanceof Element)) return;
             const composer = findComposer(boundRoot);
+            debug("USER_INPUT_OBSERVED", {
+                source: "enter", targetTag: target.tagName,
+                composerFound: Boolean(composer), inComposer: Boolean(composer && composer.contains(target)),
+            });
             if (!composer || !composer.contains(target)) return;
-            controller.noteUserTurnStarted({ source: "keyboard" });
+            noteUserTurnStarted({ source: "keyboard" });
         }, true);
 
         chrome.runtime.onMessage.addListener(function (message) {
             if (!message || typeof message !== "object") return;
             if (message.type === "CHATGPT_NETWORK_HINT" && typeof message.hint === "string") {
+                if (message.hint === "RESPONSE_REQUEST_STARTED") awaitingFirstSubmission = false;
                 controller.noteNetwork(message.hint);
                 return;
             }
             if (message.type === "CHATGPT_ROUTE_CHANGED") {
                 previousSignature = null;
-                controller.noteRouteChange(message.url || location.href);
+                noteRoute(message.url || location.href, "worker-history-message");
                 rootWatcher.checkConnection();
                 rootWatcher.start();
                 scheduleSnapshot();
@@ -909,20 +1021,20 @@
 
         window.addEventListener("popstate", function () {
             previousSignature = null;
-            controller.noteRouteChange(location.href);
+            noteRoute(location.href, "popstate");
             rootWatcher.start();
             scheduleSnapshot();
         });
         if (window.navigation && typeof window.navigation.addEventListener === "function") {
             window.navigation.addEventListener("navigatesuccess", function () {
                 previousSignature = null;
-                controller.noteRouteChange(location.href);
+                noteRoute(location.href, "navigatesuccess");
                 rootWatcher.start();
                 scheduleSnapshot();
             });
         }
 
-        controller.noteRouteChange(location.href);
+        noteRoute(location.href, "initialization");
         rootWatcher.start();
     }
 })();

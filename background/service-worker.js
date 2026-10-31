@@ -1,54 +1,19 @@
 import providers from "./providers/index.js";
+import { createNotificationPlayer } from "./notification-player.js";
 import { createLogger as createModuleLogger } from "../shared/logger.js";
 import { registerChatGPTNetworkDiagnostics } from "./chatgpt-network-diagnostics.js";
 
 const OFFSCREEN_DOC_PATH = "offscreen/offscreen.html";
 const logger = createModuleLogger("ServiceWorker");
 
-let creating;
-async function setupOffscreenDocument(path) {
-    logger.debug("正在检查是否已有 offscreen document。", {
-        path,
-        time: new Date().toISOString(),
-    });
-    const hasDocument = await chrome.offscreen.hasDocument();
-    logger.debug("offscreen document 检查完成。", { hasDocument });
+const audioLogger = createModuleLogger("ChatGPT");
+const enqueueNotification = createNotificationPlayer(chrome, OFFSCREEN_DOC_PATH, {
+    onEvent(event, trace) { audioLogger.debug(event, trace); },
+});
 
-    if (hasDocument) {
-        logger.debug("正在关闭旧 offscreen document。");
-        await chrome.offscreen.closeDocument();
-        logger.debug("旧 offscreen document 已关闭。");
-    }
-    if (creating) {
-        logger.debug("offscreen document 正在由另一个调用创建，等待现有创建任务。");
-        await creating;
-        logger.debug("现有 offscreen document 创建任务已完成。");
-        return;
-    }
-
-    logger.debug("开始创建新 offscreen document。", { path });
-    try {
-        creating = chrome.offscreen.createDocument({
-            url: path,
-            reasons: ["AUDIO_PLAYBACK"],
-            justification: "To play a notification sound when LLM responds.",
-        });
-        await creating;
-        logger.info("offscreen document 创建成功。", { path });
-    } catch (error) {
-        logger.error("offscreen document 创建失败。", error);
-        throw error;
-    } finally {
-        creating = null;
-    }
-}
-
-async function playNotification(providerName) {
-    logger.info("playNotification 已调用。", {
-        provider: providerName,
-        time: new Date().toISOString(),
-    });
-    await setupOffscreenDocument(OFFSCREEN_DOC_PATH);
+function playNotification(providerName, trace = {}) {
+    logger.info("通知已加入播放队列。", { provider: providerName });
+    return enqueueNotification({ ...trace, provider: providerName });
 }
 
 function createProviderLogger(providerName) {
@@ -124,13 +89,29 @@ function registerRuntimeMessages() {
         return;
     }
 
-    chrome.runtime.onMessage.addListener((message, sender) => {
+    chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+        // Offscreen logs are mirrored here so manual diagnosis needs only two consoles.
+        if (message?.type === "NOTIFICATION_DIAGNOSTIC"
+            && sender.url === chrome.runtime.getURL(OFFSCREEN_DOC_PATH) && !sender.tab) {
+            audioLogger.debug(message.event, message.trace);
+            return;
+        }
         for (const provider of handlers) {
-            provider.handleRuntimeMessage(message, sender, {
-                playNotification: () => playNotification(providerName(provider)),
+            const result = provider.handleRuntimeMessage(message, sender, {
+                playNotification: (trace) => playNotification(providerName(provider), trace),
                 logger,
                 offscreenPath: OFFSCREEN_DOC_PATH,
             });
+            if (result && typeof result.then === "function") {
+                result.then(() => sendResponse({ ok: true }), error => {
+                    logger.error("通知处理失败。", error);
+                    sendResponse({ ok: false });
+                });
+                return true;
+            }
+        }
+        if (message?.type === "chatgpt_detector_ready") {
+            sendResponse({ ok: true, tabId: sender.tab?.id ?? null });
         }
     });
 }
