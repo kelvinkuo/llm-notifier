@@ -1,3 +1,30 @@
+# Current diagnostics — 1.6.0
+
+ChatGPT now observes page controls only. The investigations below describe retired
+1.5.x code; their route/message/network events are no longer part of the detector.
+See [current detection rules](chatgpt-detection.md).
+
+Filter both the ChatGPT page Console and extension Service Worker Console by
+`LLM Notifier`. Reload extension, refresh page, and submit a harmless question.
+Current page events:
+
+- CONTENT_SCRIPT_LOADED / DETECTOR_READY: boot, version, worker handshake.
+- UI_STATE_CHANGED: ACTIVE / READY / UNKNOWN and recognized control type.
+- GENERATION_STARTED: start of a locally observed generating cycle.
+- STATE_CHANGED: IDLE -> GENERATING -> SETTLING -> IDLE, including interrupted settling.
+- COMPLETION_CONFIRMED / PLAY_SOUND_SENT: stable idle, one message per cycle.
+- PLAY_SOUND_ACK / PLAY_SOUND_FAILED: worker playback result.
+- INIT_FAILED / DETECTION_FAILED / READY_FAILED: initialization or bridge errors.
+
+The worker retains PLAY_SOUND_RECEIVED and existing OFFSCREEN_*/AUDIO_PLAY_* events.
+AUDIO_PLAY_SUCCEEDED acknowledges ended playback, rather than merely dispatch.
+Logs correlate by diagnosticId, tabId, sequence and timestamp. The page does not
+log URL, conversation identities, prompts, responses, or each DOM mutation.
+A sequence counts observed page generation cycles only. There is no route reset,
+network-failure latch, history baseline, or per-conversation recovery state.
+
+## Historical investigation (retired implementation)
+
 # ChatGPT local diagnostic run
 
 This round enables diagnostics only. Existing uncommitted work is retained. No
@@ -130,3 +157,71 @@ startup sound. Submit a normal question there, then separately use New chat and 
 another question. Capture the filtered page logs if the latter stays silent, including
 ROUTE_OBSERVED, route changed, reset reason, and DETECTOR_STATE. No browser login or
 UI acceptance was performed by Codex for this follow-up.
+
+## 1.5.3: confirmed internal new-chat URL replacement and live-root baseline fix
+
+The 2026-10-31 local log confirms both reported and live route keys change together:
+new draft -> provisional conversation (kept) -> another conversation key while the
+composer is ACTIVE (previously reset). Source is navigatesuccess; the worker event
+agrees with the live route, ruling out a delayed worker hint for this occurrence.
+The user did not switch conversations during generation.
+
+It also shows rootWatcher.start rebinding an already-upgraded conversation div with
+replaced=false during ARMED. baselineRoot then records the pending response as known
+history. GENERATION_STARTED appears but generationSeen remains false.
+
+Targeted fixes:
+
+- A turn begun on a draft can follow a subsequent conversation-id replacement only
+  when the visible composer is ACTIVE and its single user-message identity exactly
+  matches the active turn. Logs show keptTurn=true, reason=same_new_chat_user.
+- After such a replacement, user-message continuity remains required. Empty remounts
+  block completion; different history messages cancel the turn and refresh baseline.
+- Explicit in-page navigation links and browser back/forward cancel tracking. Turns
+  begun in existing conversations do not receive the new-chat route exception.
+- Root watcher correctly marks direct rebinds as replacements. More importantly,
+  root rebinding never overwrites a live turn's history baseline, regardless of the
+  replacement flag.
+
+Version is 1.5.3. Regressions reproduce the provisional/canonical route order with a
+live root rebind, delayed history, pending/final response ids, empty remounts, real
+history navigation, and exactly-once completion. No fixed wait was introduced;
+existing 800ms settling is unchanged. Gemini, notification audio, and cross-session
+tracking remain unchanged. Local Chrome acceptance is still required; no commit or
+push was made for this fix.
+
+## 1.5.4: stale-turn recovery and observer reconnection
+
+The 2026-11-06 excerpt shows a fresh Enter still using sequence 10 and inheriting
+networkFailedSeen=true from before that send, with no subsequent DOM lifecycle logs.
+This demonstrates that the old turn has not been replaced; the excerpt does not prove
+which DOM replacement occurred on the real page, or that every missed notification has
+the same cause.
+
+Two bugs were reproduced in tests before changes (both tests failed on 1.5.3):
+
+1. A failed unfinished turn survives a new explicit submission from an idle composer,
+   retaining sequence/failure flags instead of beginning a clean turn.
+2. Replacing an ancestor of the transcript's watched parent AND the composer leaves
+   both scoped observers disconnected. A parent-only observer cannot see replacement
+   of its own ancestor, so this can remain silent without navigation/network callbacks.
+
+Fixes retain existing selectors and completion rules:
+
+- Explicit submissions and network hints refresh observer connections; a persistent
+  document childList observer detects disconnected transcript/composer surfaces. It
+  performs connectivity checks only and does not log individual mutations.
+- Network hints schedule a fresh DOM snapshot; they never directly play sound.
+- Explicit input on a ready composer recovers failed/stalled prior turns. A still-armed
+  healthy submission is retained to avoid replacing the same pending send. A currently
+  active composer does not trigger this recovery. Old content is baselined before a
+  fresh sequence, so it cannot be mistaken for that sequence's response.
+- SUBMISSION_CONTEXT records actual live composer/turn state for each submission;
+  SUBMISSION_RECOVERY identifies replacement of a stuck turn; SURFACE_RESYNC reports
+  observer reconnection. No prompt/response text or new fixed timer is added.
+
+All 109 Node tests pass, including ancestor+composer replacement without network or
+navigation, stale failure recovery, and hint-driven DOM refresh that stays silent
+while generation is still active. Version 1.5.4 includes the still-uncommitted 1.5.3
+changes. Gemini and shared audio code are unchanged. Chrome acceptance remains manual:
+reload extension, refresh ChatGPT, ask two consecutive questions in the same session.

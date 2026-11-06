@@ -5,16 +5,13 @@ const flush = () => new Promise(resolve => setImmediate(resolve));
 test('diagnostic handshake returns tabId and offscreen milestones reach the worker console', async () => {
     const oldChrome = globalThis.chrome, oldLog = console.log;
     const logs = [], runtimeListeners = [];
-    const event = () => ({ addListener() {} });
     globalThis.chrome = {
         runtime: {
             onMessage: { addListener(fn) { runtimeListeners.push(fn); } },
             getURL: path => `chrome-extension://fixture/${path}`,
-            getManifest: () => ({ version: '1.5.2' }),
+            getManifest: () => ({ version: '1.6.0' }),
             sendMessage: async () => ({ ok: true }),
         },
-        webRequest: { onBeforeRequest: event(), onCompleted: event(), onErrorOccurred: event() },
-        webNavigation: { onHistoryStateUpdated: event() },
         offscreen: { hasDocument: async () => true },
     };
     console.log = (...args) => logs.push(args);
@@ -25,8 +22,11 @@ test('diagnostic handshake returns tabId and offscreen milestones reach the work
         let acknowledgment;
         receive({ type: 'chatgpt_detector_ready', diagnosticId: 'doc-test', debug: true }, sender, value => { acknowledgment = value; });
         assert.deepEqual(acknowledgment, { ok: true, tabId: 17 });
-        receive({ action: 'play_sound', provider: 'ChatGPT', sequence: 2, diagnosticId: 'doc-test', debug: true }, sender, () => {});
+        let playbackAck;
+        const keepAlive = receive({ action: 'play_sound', provider: 'ChatGPT', sequence: 2, diagnosticId: 'doc-test', debug: true }, sender, value => { playbackAck = value; });
+        assert.equal(keepAlive, true);
         await flush();
+        assert.deepEqual(playbackAck, { ok: true });
         const output = JSON.stringify(logs);
         for (const event of ['CHATGPT_DETECTOR_READY', 'PLAY_SOUND_RECEIVED', 'OFFSCREEN_REUSED', 'AUDIO_PLAY_SUCCEEDED']) {
             assert.ok(output.includes(event), event);

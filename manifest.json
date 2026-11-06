@@ -2,16 +2,14 @@
     "manifest_version": 3,
     "name": "LLM 响应通知器",
     "description": "当ChatGPT或Gemini响应完成时播放提示音。",
-    "version": "1.5.2",
+    "version": "1.6.0",
     "icons": {
         "16": "assets/icons/icon-16.png",
         "48": "assets/icons/icon-48.png",
         "128": "assets/icons/icon-128.png"
     },
     "permissions": [
-        "offscreen",
-        "webRequest",
-        "webNavigation"
+        "offscreen"
     ],
     "host_permissions": [
         "https://gemini.google.com/*",
